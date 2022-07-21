@@ -5,20 +5,18 @@ use crate::rusttls::stream::Stream;
 
 use futures_core::ready;
 use futures_io::{AsyncRead, AsyncWrite};
-use rustls::ServerSession;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::{io, mem};
-
-use rustls::Session;
+use std::fmt::{Debug, Formatter};
+use rustls::{Connection};
 
 /// The server end of a TLS connection. Can be used like any other bidirectional IO stream.
 /// Wraps the underlying TCP stream.
-#[derive(Debug)]
 pub struct TlsStream<IO> {
     pub(crate) io: IO,
-    pub(crate) session: ServerSession,
+    pub(crate) session: Connection,
     pub(crate) state: TlsState,
 }
 
@@ -28,8 +26,8 @@ pub(crate) enum MidHandshake<IO> {
 }
 
 impl<IO> Future for MidHandshake<IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
 {
     type Output = io::Result<TlsStream<IO>>;
 
@@ -59,8 +57,8 @@ where
 }
 
 impl<IO> AsyncRead for TlsStream<IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
 {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -99,8 +97,8 @@ where
 }
 
 impl<IO> AsyncWrite for TlsStream<IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
 {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -130,5 +128,23 @@ where
         let mut stream =
             Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
         stream.as_mut_pin().poll_close(cx)
+    }
+}
+
+impl<IO> Debug for TlsStream<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match &self.session {
+            Connection::Client(client) => {
+                write!(f, "{:?}", client)?;
+            }
+            Connection::Server(server) => {
+                write!(f, "{:?}", server)?;
+            }
+        }
+
+        write!(f, "{:?}", self.state)
+
     }
 }

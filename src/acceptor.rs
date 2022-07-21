@@ -2,7 +2,7 @@ use crate::common::tls_state::TlsState;
 use crate::server;
 
 use futures_io::{AsyncRead, AsyncWrite};
-use rustls::{ServerConfig, ServerSession};
+use rustls::{Connection, ServerConfig, ServerConnection};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -43,13 +43,20 @@ impl TlsAcceptor {
     fn accept_with<IO, F>(&self, stream: IO, f: F) -> Accept<IO>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
-        F: FnOnce(&mut ServerSession),
+        F: FnOnce(&mut ServerConnection),
     {
-        let mut session = ServerSession::new(&self.inner);
+        let mut session = match ServerConnection::new(self.inner.clone()) {
+            Ok(session) => {session}
+            Err(err) => {
+                //Literally, the code always returns Oks in this, so there is no possibility of an error
+                panic!("This is not meant to happen {:?}?", err);
+            }
+        };
+
         f(&mut session);
 
         Accept(server::MidHandshake::Handshaking(server::TlsStream {
-            session,
+            session: Connection::Server(session),
             io: stream,
             state: TlsState::Stream,
         }))

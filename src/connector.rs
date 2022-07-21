@@ -1,15 +1,15 @@
+use std::convert::TryFrom;
 use crate::common::tls_state::TlsState;
 
 use crate::client;
 
 use futures_io::{AsyncRead, AsyncWrite};
-use rustls::{ClientConfig, ClientSession};
+use rustls::{ClientConfig, ClientConnection, Connection, OwnedTrustAnchor, RootCertStore, ServerName};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use webpki::DNSNameRef;
 
 /// The TLS connecting part. The acceptor drives
 /// the client side of the TLS handshake process. It works
@@ -64,10 +64,22 @@ impl From<ClientConfig> for TlsConnector {
 
 impl Default for TlsConnector {
     fn default() -> Self {
-        let mut config = ClientConfig::new();
-        config
-            .root_store
-            .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+        let mut cert = RootCertStore::empty();
+
+        cert.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter()
+            .map(|trust_anchor| OwnedTrustAnchor::from_subject_spki_name_constraints(
+            trust_anchor.subject,
+            trust_anchor.spki,
+            trust_anchor.name_constraints)));
+
+        let config = ClientConfig::builder()
+            .with_safe_default_cipher_suites()
+            .with_safe_default_kx_groups()
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(cert)
+            .with_no_client_auth();
+
         Arc::new(config).into()
     }
 }
@@ -96,8 +108,8 @@ impl TlsConnector {
     /// handshake. It will resolve when the handshake is over.
     #[inline]
     pub fn connect<'a, IO>(&self, domain: impl AsRef<str>, stream: IO) -> Connect<IO>
-    where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        where
+            IO: AsyncRead + AsyncWrite + Unpin,
     {
         self.connect_with(domain, stream, |_| ())
     }
@@ -105,28 +117,37 @@ impl TlsConnector {
     // NOTE: Currently private, exposing ClientSession exposes rusttls
     // Early data should be exposed differently
     fn connect_with<'a, IO, F>(&self, domain: impl AsRef<str>, stream: IO, f: F) -> Connect<IO>
-    where
-        IO: AsyncRead + AsyncWrite + Unpin,
-        F: FnOnce(&mut ClientSession),
+        where
+            IO: AsyncRead + AsyncWrite + Unpin,
+            F: FnOnce(&mut ClientConnection),
     {
-        let domain = match DNSNameRef::try_from_ascii_str(domain.as_ref()) {
+        let domain = match ServerName::try_from(domain.as_ref()) {
             Ok(domain) => domain,
             Err(_) => {
                 return Connect(ConnectInner::Error(Some(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "invalid domain",
-                ))))
+                ))));
             }
         };
 
-        let mut session = ClientSession::new(&self.inner, domain);
+        let mut session = match ClientConnection::new(self.inner.clone(), domain) {
+
+            Ok(session) => { session }
+            Err(err) => {
+                return Connect(ConnectInner::Error(Some(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    format!("Failed to create client connection {:?}", err),
+                ))));
+            }
+        };
         f(&mut session);
 
         #[cfg(not(feature = "early-data"))]
         {
             Connect(ConnectInner::Handshake(client::MidHandshake::Handshaking(
                 client::TlsStream {
-                    session,
+                    session: Connection::Client(session),
                     io: stream,
                     state: TlsState::Stream,
                 },
@@ -137,14 +158,14 @@ impl TlsConnector {
         {
             Connect(ConnectInner::Handshake(if self.early_data {
                 client::MidHandshake::EarlyData(client::TlsStream {
-                    session,
+                    session: Connection::Client(session),
                     io: stream,
                     state: TlsState::EarlyData,
                     early_data: (0, Vec::new()),
                 })
             } else {
                 client::MidHandshake::Handshaking(client::TlsStream {
-                    session,
+                    session: Connection::Client(session),
                     io: stream,
                     state: TlsState::Stream,
                     early_data: (0, Vec::new()),

@@ -4,20 +4,18 @@ use crate::common::tls_state::TlsState;
 use crate::rusttls::stream::Stream;
 use futures_core::ready;
 use futures_io::{AsyncRead, AsyncWrite};
-use rustls::ClientSession;
+use rustls::{Connection};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::{io, mem};
-
-use rustls::Session;
+use std::fmt::{Debug, Formatter};
 
 /// The client end of a TLS connection. Can be used like any other bidirectional IO stream.
 /// Wraps the underlying TCP stream.
-#[derive(Debug)]
 pub struct TlsStream<IO> {
     pub(crate) io: IO,
-    pub(crate) session: ClientSession,
+    pub(crate) session: Connection,
     pub(crate) state: TlsState,
 
     #[cfg(feature = "early-data")]
@@ -100,10 +98,12 @@ where
                 }
 
                 // write early data (fallback)
-                if !stream.session.is_early_data_accepted() {
-                    while *pos < data.len() {
-                        let len = ready!(stream.as_mut_pin().poll_write(cx, &data[*pos..]))?;
-                        *pos += len;
+                if let Connection::Client(session) = stream.session {
+                    if !session.is_early_data_accepted() {
+                        while *pos < data.len() {
+                            let len = ready!(stream.as_mut_pin().poll_write(cx, &data[*pos..]))?;
+                            *pos += len;
+                        }
                     }
                 }
 
@@ -161,17 +161,20 @@ where
 
                 let (pos, data) = &mut this.early_data;
 
-                // write early data
-                if let Some(mut early_data) = stream.session.early_data() {
-                    let len = match early_data.write(buf) {
-                        Ok(n) => n,
-                        Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                            return Poll::Pending
-                        }
-                        Err(err) => return Poll::Ready(Err(err)),
-                    };
-                    data.extend_from_slice(&buf[..len]);
-                    return Poll::Ready(Ok(len));
+
+                if let Connection::Client(session) = stream.session {
+                    // write early data
+                    if let Some(mut early_data) = session.early_data() {
+                        let len = match early_data.write(buf) {
+                            Ok(n) => n,
+                            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                                return Poll::Pending
+                            }
+                            Err(err) => return Poll::Ready(Err(err)),
+                        };
+                        data.extend_from_slice(&buf[..len]);
+                        return Poll::Ready(Ok(len));
+                    }
                 }
 
                 // complete handshake
@@ -180,10 +183,12 @@ where
                 }
 
                 // write early data (fallback)
-                if !stream.session.is_early_data_accepted() {
-                    while *pos < data.len() {
-                        let len = ready!(stream.as_mut_pin().poll_write(cx, &data[*pos..]))?;
-                        *pos += len;
+                if let Connection::Client(session) = stream.session {
+                    if !session.is_early_data_accepted() {
+                        while *pos < data.len() {
+                            let len = ready!(stream.as_mut_pin().poll_write(cx, &data[*pos..]))?;
+                            *pos += len;
+                        }
                     }
                 }
 
@@ -213,5 +218,23 @@ where
         let mut stream =
             Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
         stream.as_mut_pin().poll_close(cx)
+    }
+}
+
+impl<IO> Debug for TlsStream<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match &self.session {
+            Connection::Client(client) => {
+                write!(f, "{:?}", client)?;
+            }
+            Connection::Server(server) => {
+                write!(f, "{:?}", server)?;
+            }
+        }
+
+        write!(f, "{:?}", self.state)
+
     }
 }
